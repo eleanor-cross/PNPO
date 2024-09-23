@@ -1,0 +1,1180 @@
+---
+title: "Nucleotide plot PNPO 7.19"
+output: html_document
+date: "2024-07-19"
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(ggforce)
+library(ggrepel)
+rm(list = ls())
+```
+
+
+# Paramters 
+
+Store in list to avoid having too many variables in enviornment 
+
+```{r}
+params =  list(scale_factor = 1,
+              axis.y.padding = 50, # y axis padding 
+              y.axis.more.vertical.padding = 400, # additional y axis padding above the y axis
+              x.padding = 100, # padding for x axis 
+              x.spacing = 1,# spacing for x dodging 
+              mutation.base.dodge = .05,
+              overlap = 30,
+              split_overlap = 3,
+              drad = 25,
+              y.dodge.padding = 50,
+              x.dodge.padding = 22,
+              yvalue = 0,
+              dot.y.nudge = 75,
+              # gene stuf
+              gene.height = 10,
+              space.between.genes = 5,
+              # # exons ,
+              linesize = 1,
+              # # introns 
+              intron.size = 1,
+              intron.linetype = 2,
+              # labels 
+              label.allowance = 50,
+              label.ypadding = 100,
+              text.size = 2.5,
+              label.y.nudge = 80,
+              text.size = 2.5,
+              overlap_allowance = 1.5)
+```
+
+## Setting up functions and data 
+
+### Functions 
+
+Define some useful functions 
+
+```{r}
+# function for finding range, collapsing list into string 
+r = function(x1,x2){
+  v = seq(from = x1, to = x2, by = 1) %>% paste(collapse = ",")
+  return(v)
+}
+
+# function for finding range, scaling, collapsing list into string 
+scale_r = function(x1,x2){
+  v = seq(from = x1, to = x2, by = 1/params[['scale_factor']]) %>% paste(collapse = ",")
+  return(v)
+}
+```
+
+### Mutations df 
+
+```{r}
+# read in mutations
+m = fread("C:/Users/ezraa/Desktop/PNPO 7.9.24/mutations cleaning + checking/mutations manually checked.csv")
+# find which are homozygous and which are heterozygous 
+m = m %>% group_by(`Patient id (in study)`,`Link/Reference`) %>% mutate(count = row_number(),count_max = max(count)) %>%  ungroup()
+m$het[m$het==""]  = ifelse(m[m$het=="","count_max"]==1,"Homozygous", "Compound heterozygous")
+# drop columns used for this 
+m = m %>% select(-count) %>% select(-count_max)
+```
+
+### Sequence FastA
+
+PNPO_nuc.fasta = FASTA of nucleotide sequence
+PNPO_xs.fasta = file containing FASTA sequences for all exons. From NCBI GeneBank
+
+```{r}
+# read in fasta file 
+fasta = phylotools::read.fasta("C:/Users/ezraa/Desktop/PNPO 7.9.24/nucleotide plot/PNPO_nuc.fasta")
+
+# read in exons 
+exons = phylotools::read.fasta("C:/Users/ezraa/Desktop/PNPO 7.9.24/nucleotide plot/PNPO_xs.fasta")
+
+# find where coding region starts
+coding_nucleotides = "ATGACGTGCTGGCTG"
+coding_start = str_locate_all(pattern = coding_nucleotides, string = exons$seq.text[1])[[1]][1]
+rm(coding_nucleotides)
+
+ending_nucleotides = "GAGAGACTTGCACCT"
+coding_stop = str_locate_all(pattern = ending_nucleotides, exons$seq.text[7])[[1]][2]
+rm(ending_nucleotides)
+```
+
+
+### Exons and introns 
+
+Find where exons and introns start 
+
+Exons:
+
+```{r}
+exon_indices = sapply(exons$seq.text, FUN = str_locate_all, string = fasta$seq.text) %>%
+  sapply(unlist) %>%
+  t() %>%
+  as.data.frame() 
+
+# new dataframe for exons 
+exons.df = cbind(exons, exon_indices) %>% 
+  rename(start = V1, stop = V2) %>% 
+  mutate(start = as.numeric(start), 
+         stop = as.numeric(stop)) %>%
+  mutate(range = mapply(start,stop, FUN = r))
+rm(exons, exon_indices)
+
+exons.df$names = c("Exon 1", "Exon 2", "Exon 3", "Exon 4", "Exon 5", "Exon 6", "Exon 7")
+```
+
+Introns:
+
+```{r}
+# find intron coordinates
+stop_loop = nrow(exons.df)-1
+# empty intron dataframe 
+introns.df = data.frame(matrix(ncol = ncol(exons.df), nrow = stop_loop))
+colnames(introns.df) = c("seq.name", "seq.text", "start", "stop", "range",  "names")
+i = 1
+for(i in 1:stop_loop){
+  introns.df$start[i] = exons.df$stop[i]+1 
+  introns.df$stop[i] = exons.df$start[i+1]-1
+  introns.df$names[i] = paste("Intron", sep = " ", i)
+}
+rm(stop_loop)
+introns.df = introns.df %>%
+  mutate(range = mapply(start,stop, FUN = r))
+```
+
+Find coding regions for exons 
+
+```{r}
+exons.df$coding_start = NA
+exons.df$coding_stop = NA
+introns.df$coding_start = 0
+introns.df$coding_stop = 0
+
+i = 1
+for(i in 1:nrow(exons.df)){
+  if(i==1){
+    exons.df$coding_start[i] = coding_start
+    exons.df$coding_stop[i] = exons.df$stop[i]
+  } else if (i==nrow(exons.df)){
+    exons.df$coding_start[i] = exons.df$start[i]
+    exons.df$coding_stop[i] = max((exons.df$start[i]:exons.df$stop[i])[1:coding_stop])
+  } else {
+    exons.df$coding_start[i] = exons.df$start[i]
+    exons.df$coding_stop[i] = exons.df$stop[i]
+  }
+}
+```
+
+
+Find where coding starts and stops 
+
+```{r}
+exons.df$coding_start_index = NA
+exons.df$coding_stop_index = NA
+for(i in 1:nrow(exons.df)){
+  if(i==1){
+    exons.df$coding_start_index[i] = 1
+    exons.df$coding_stop_index[i] = exons.df$coding_stop[i]-exons.df$coding_start[i]+1
+  } else {
+    exons.df$coding_start_index[i] = exons.df$coding_stop_index[i-1]+1
+    range = exons.df$coding_stop[i] - exons.df$coding_start[i]
+    exons.df$coding_stop_index[i] = exons.df$coding_start_index[i]+range
+  }
+}
+rm(i)
+```
+
+Introns don't code-- need columns for later joining 
+
+```{r}
+# introns don't code -> will be 0 
+introns.df$coding_start_index = 0
+introns.df$coding_stop_index = 0
+
+exons.and.introns.df = rbind(exons.df, introns.df) %>% select(-seq.name)
+rm(exons.df, introns.df)
+```
+
+Set levels to "Exon 1", "Intron 1", "Exon 2" ...
+```{r}
+exons.and.introns.df_levels = exons.and.introns.df$names[order(as.numeric(gsub("\\D", "", exons.and.introns.df$names)))] %>% as.vector()
+exons.and.introns.df$names = factor(exons.and.introns.df$names, levels = exons.and.introns.df_levels, ordered = TRUE)
+rm(range)
+exons.and.introns.df = exons.and.introns.df %>% arrange(names)
+rownames(exons.and.introns.df) = NULL
+```
+
+Look at first few rows, omit range and seq.text because they are so long 
+
+```{r}
+head(exons.and.introns.df[,-c(which(colnames(exons.and.introns.df)=="range"),which(colnames(exons.and.introns.df)=="seq.text"))])
+```
+
+## Generated values for scaled introns 
+
+Now, scale exons and introns according to the scale_factor set up top 
+
+```{r}
+for(i in 1:length(exons.and.introns.df_levels)){
+  if(i==1){
+    row = exons.and.introns.df[exons.and.introns.df$names==exons.and.introns.df_levels[i],]
+    exons.and.introns.df$scale_start[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = row$start
+    exons.and.introns.df$scale_stop[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = row$stop
+  } else if(grepl(pattern = "Intron", exons.and.introns.df$names[i])==TRUE){
+    row = exons.and.introns.df[exons.and.introns.df$names==exons.and.introns.df_levels[i],]
+    lag = exons.and.introns.df[exons.and.introns.df$names==exons.and.introns.df_levels[i-1],]
+    intron_start = lag$scale_stop + (1/params[['scale_factor']])
+    adjusted_range = (row$stop - row$start)/params[['scale_factor']]
+    intron_stop = intron_start+adjusted_range
+    exons.and.introns.df$scale_start[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = intron_start
+    exons.and.introns.df$scale_stop[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = intron_stop
+  } else if(grepl(pattern = "Exon", exons.and.introns.df$names[i])==TRUE){
+    row = exons.and.introns.df[exons.and.introns.df$names==exons.and.introns.df_levels[i],]
+    lag = exons.and.introns.df[exons.and.introns.df$names==exons.and.introns.df_levels[i-1],]
+    exon_start = lag$scale_stop+1
+    range = row$stop-row$start
+    exon_stop = exon_start + range
+    exons.and.introns.df$scale_start[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = exon_start
+    exons.and.introns.df$scale_stop[exons.and.introns.df$names==exons.and.introns.df_levels[i]] = exon_stop
+  }
+  
+}
+
+rm(coding_start, coding_stop, i, intron_start, intron_stop, row, lag, exon_start, exon_stop)
+```
+
+
+```{r}
+head(exons.and.introns.df[,-c(which(colnames(exons.and.introns.df)=="range"),which(colnames(exons.and.introns.df)=="seq.text"))])
+```
+
+Find coding indices for dataframe 
+
+What this code does is generate 4 ranges: sequence_range, scale_range, coding_range, and coding_index_range. 
+
+These can then be used to match up the original mutation indices to the scale of the plot
+
+```{r}
+# finding indices for dataframe 
+coding.df = exons.and.introns.df %>% select(-range) %>% select(-seq.text) %>% arrange(names) %>% 
+  mutate(sequence_range = NA,
+         scale_range = NA, 
+         coding_range = NA, 
+         coding_index_range = NA)
+
+
+
+for(i in 1:nrow(coding.df)){
+  row = coding.df[coding.df$names==exons.and.introns.df_levels[i],]
+  if(grepl(pattern = "Exon", x = exons.and.introns.df$names[i])==TRUE){
+    coding.df$sequence_range[coding.df$names==exons.and.introns.df$names[i]] = r(coding.df$start[coding.df$names==exons.and.introns.df$names[i]],coding.df$stop[coding.df$names==exons.and.introns.df$names[i]])
+    coding.df$scale_range[coding.df$names==exons.and.introns.df$names[i]] = r(coding.df$scale_start[coding.df$names==exons.and.introns.df$names[i]],coding.df$scale_stop[coding.df$names==exons.and.introns.df$names[i]])
+    coding.df$coding_range[coding.df$names==exons.and.introns.df$names[i]] = r(coding.df$coding_start[coding.df$names==exons.and.introns.df$names[i]],coding.df$coding_stop[coding.df$names==exons.and.introns.df$names[i]])
+    coding.df$coding_index_range[coding.df$names==exons.and.introns.df$names[i]] = r(coding.df$coding_start_index[coding.df$names==exons.and.introns.df$names[i]], coding.df$coding_stop_index[coding.df$names==exons.and.introns.df$names[i]])
+  } else if(grepl(pattern = "Intron", x = exons.and.introns.df$names[i])==TRUE){
+    coding.df$sequence_range[coding.df$names==exons.and.introns.df$names[i]] = r(coding.df$start[coding.df$names==exons.and.introns.df$names[i]],coding.df$stop[coding.df$names==exons.and.introns.df$names[i]])
+    coding.df$scale_range[coding.df$names==exons.and.introns.df$names[i]] = scale_r(coding.df$scale_start[coding.df$names==exons.and.introns.df$names[i]],coding.df$scale_stop[coding.df$names==exons.and.introns.df$names[i]])
+    coding.df$coding_range[coding.df$names==exons.and.introns.df$names[i]] = rep(x = c(0), times = length(str_split(coding.df$sequence_range[i], pattern = ",")[[1]])) %>% paste(collapse=",")
+    coding.df$coding_index_range[coding.df$names==exons.and.introns.df$names[i]] = rep(x = c(0), times = length(str_split(coding.df$sequence_range[i], pattern = ",")[[1]])) %>% paste(collapse=",")
+  }
+}
+rm(i,range, row)
+```
+
+
+sequence_range = straight index 1-nchar(fastasequence), no scaling 
+scale_range = scaling index
+coding_range = range of values corresponding to sequence.range that code for protein 
+coding_index_range = range of values that correspond to values in the mutation (e.g. c[102 G>T])
+
+So the below counts the number of commas in each string e.g. counts the number of items in each 
+
+Why am I storing them in strings instead of lists? Because R does not place nice with dataframes containing lists and I don't want to work with tibbles. 
+
+```{r}
+# account for the fact that coding ranges are shifted
+coding.df %>% 
+  select(sequence_range, scale_range, coding_range, coding_index_range) %>% 
+  sapply(FUN = function(x){str_count(x, pattern = ",")}) %>% 
+  as.data.frame() %>% 
+  head()
+```
+```{r}
+coding.df %>% 
+  select(sequence_range, scale_range, coding_range, coding_index_range) %>% 
+  sapply(FUN = function(x){
+    first = str_extract(pattern = "^[^,]+",x)
+    last = str_extract(pattern = "[^,]+$", x)
+    return(paste0(first,":",last))
+      }) %>% 
+  as.data.frame() %>%
+  head()
+```
+
+Need to add NA values so they are all the same number of observations 
+
+Necessary when making long dataframe later 
+
+
+```{r}
+exon_1_sequence_count = coding.df$sequence_range[coding.df$names=="Exon 1"] %>% str_count(",")
+exon_1_coding_count = coding.df$coding_range[coding.df$names=="Exon 1"] %>% str_count(",")
+difference = exon_1_sequence_count - exon_1_coding_count
+append = rep(x = "NA", times = difference) %>% paste(collapse = ",")
+coding.df$coding_range[coding.df$names=="Exon 1"] = c(append, coding.df$coding_range[coding.df$names=="Exon 1"]) %>% paste(collapse = ",")
+coding.df$coding_index_range[coding.df$names=="Exon 1"] = c(append, coding.df$coding_index_range[coding.df$names=="Exon 1"]) %>% paste(collapse = ",")
+rm(exon_1_sequence_count, exon_1_coding_count, difference, append)
+
+last_exon_sequence_count = coding.df$sequence_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]] %>% str_count(",")
+last_exon_coding_count = coding.df$coding_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]] %>% str_count(",")
+difference = last_exon_sequence_count - last_exon_coding_count
+append = rep(x = "NA", times = difference) %>% paste(collapse = ",")
+coding.df$coding_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]] = c(coding.df$coding_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]], append) %>% paste(collapse = ",")
+coding.df$coding_index_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]] = c(coding.df$coding_index_range[coding.df$names==exons.and.introns.df_levels[length(exons.and.introns.df_levels)]], append) %>% paste(collapse = ",")
+```
+
+
+Now check the number in each 
+
+```{r}
+coding.df %>% 
+  select(sequence_range, scale_range, coding_range, coding_index_range) %>% 
+  sapply(FUN = function(x){str_count(x, pattern = ",")}) %>% 
+  as.data.frame() %>% 
+  head()
+```
+
+It's the same!
+
+Now need to generate a vector that is as long as the number of nucleotides in the gene. 
+
+It will have the name of the exon for each position in gene 
+
+
+```{r}
+count = coding.df %>% select(sequence_range, scale_range, coding_range, coding_index_range) %>% sapply(FUN = function(x){1+str_count(x, pattern = ",")}) %>% as.data.frame() %>% select(sequence_range) %>% rename(number = sequence_range) %>% mutate(names = exons.and.introns.df_levels) 
+```
+
+Generate vector 
+
+```{r}
+repeated_names = mapply(FUN = rep, count$names, count$number) %>% sapply(FUN = paste, collapse = ",") %>% as.vector()
+```
+
+Make it long
+
+```{r}
+indexing.df = coding.df %>% mutate(names = repeated_names) %>% #add name column 
+  select(names, sequence_range, scale_range, coding_range, coding_index_range) %>% 
+  separate_longer_delim(everything(), delim = ",") %>% 
+  mutate(nuc_ind = as.numeric(coding_index_range))
+```
+Don't worry about NAs--there should be NAs from the coding range 
+
+```{r}
+head(indexing.df)
+```
+
+## Adding mutations into dataframe
+
+This is what allows for scaling 
+
+Merge by the coding_range
+
+```{r}
+mutations = m %>% group_by(pro, nuc, Type, pro_ind, nuc_ind, intron_shift) %>% reframe(id_list = list(`Patient id (in study)`),
+                                                                                       refernece_list = list(`Link/Reference`),
+                                                                                       heterozygous_list = list(het)) 
+```
+
+Fixing one mutation by hand that occured after the end of the coding range 
+
+```{r}
+mutations$nuc_ind[mutations$pro=="Ter262Gln"] = 783
+```
+
+Add in positions with indexing.df 
+
+```{r}
+mutations.df = left_join(mutations, indexing.df) %>% 
+  mutate(scale_range = as.numeric(scale_range))
+mutations.df$scale_range[mutations$pro=="Ter262Gln"] = indexing.df$scale_range[indexing.df$nuc_ind == mutations$nuc_ind[mutations$pro=="Ter262Gln"]] %>% na.omit() %>% as.numeric() + 1
+```
+
+Remove dataframes used for calculations 
+
+```{r}
+rm(mutations, m, coding.df, append, adjusted_range, difference, last_exon_coding_count, last_exon_sequence_count)
+```
+
+
+```{r}
+mutations.df$id_list = paste(mutations.df$id_list)
+mutations.df$refernece_list = paste(mutations.df$refernece_list)
+mutations.df$heterozygous_list = paste(mutations.df$heterozygous_list)
+```
+
+Get rid of some extra columns 
+
+```{r}
+mutations.df = mutations.df %>% select(-refernece_list) %>% select(-heterozygous_list)
+```
+
+## Add introns to mutations 
+
+Scale the introns 
+
+Introns are given in form 673+[whatever]. Where 673 would be the coding index of the end of an exon and [whatever] is the number of BPs it is after
+
+```{r}
+mutations.df = mutations.df %>%
+  mutate(intron_factor = ifelse(!is.na(intron_shift),
+                                intron_shift*(1/params[['scale_factor']]),
+                                0),
+         adjusted_for_introns = scale_range + intron_factor) %>%
+  rename(old_scale_range = scale_range,
+         scale_range = adjusted_for_introns)
+```
+
+
+
+# Generating coordinates for mutations
+
+```{r}
+dot_y_base = params[['yvalue']] + (params[['gene.height']]) + params[['drad']] + params[['dot.y.nudge']]
+```
+
+Add scaled coding start and stop to exons.and.introns.df
+
+```{r}
+exons.and.introns.df$scale_coding_start = exons.and.introns.df$scale_start
+exons.and.introns.df$scale_coding_start[1] = exons.and.introns.df$coding_start[1]
+
+exons.and.introns.df$scale_coding_stop = exons.and.introns.df$scale_stop
+exons.and.introns.df$scale_coding_stop[nrow(exons.and.introns.df)] = exons.and.introns.df$scale_coding_start[nrow(exons.and.introns.df)] + (exons.and.introns.df$coding_stop[nrow(exons.and.introns.df)]- exons.and.introns.df$coding_start[nrow(exons.and.introns.df)])
+```
+
+## x-dodging 
+
+```{r}
+mutations.df = mutations.df %>% arrange(scale_range) 
+mutations.df$split_overlap_bool = NA
+```
+
+Get booleon value to determine if splitting along the x axis is necessary 
+
+```{r}
+# get bool 
+i = 1
+for(i in 1:nrow(mutations.df)){
+  onerow = mutations.df[i,] 
+  if(i==1){
+    lead = mutations.df[i+1,]
+    mutations.df$split_overlap_bool[i] = ifelse(lead$scale_range-onerow$scale_range < params[['split_overlap']] & lead$names==onerow$names, TRUE, FALSE) } else if(i == nrow(mutations.df)){
+      lag = mutations.df[i-1,]
+      mutations.df$split_overlap_bool[i] = ifelse(onerow$scale_range - lag$scale_range < params[['split_overlap']] & lag$names==onerow$names, TRUE, FALSE)
+    } else {
+      lead = mutations.df[i+1,]
+      lag = mutations.df[i-1,]
+      mutations.df$split_overlap_bool[i] = ifelse(lead$scale_range-onerow$scale_range < params[['split_overlap']] & lead$names==onerow$names & lag$names==onerow$names, 
+                                                  TRUE, 
+                                                  ifelse(onerow$scale_range - lag$scale_range < params[['split_overlap']] & lead$names==onerow$names & lag$names==onerow$names, 
+                                                         TRUE, 
+                                                         FALSE))
+    }
+}
+
+rm(i, lag, lead, onerow)
+```
+
+Now generate groups based on which will be split from the same "tree"
+
+```{r}
+mutations.df$split_overlap_group = NA
+
+# get groups 
+i = 1
+for(i in 1:nrow(mutations.df)){
+  onerow = mutations.df[i,]
+  if(i==1){
+    mutations.df$split_overlap_group[i] = 1
+  } else {
+    lag = mutations.df[i-1,]
+    if(onerow$split_overlap_bool==TRUE & lag$split_overlap_bool == TRUE){
+      mutations.df$split_overlap_group[i] = lag$split_overlap_group
+    } else {
+      mutations.df$split_overlap_group[i] = lag$split_overlap_group + 1
+    }
+  }
+}
+
+```
+
+Generate new x values 
+
+```{r}
+mutations.df = mutations.df  %>% group_by(split_overlap_group) %>% 
+  mutate(anchor = mean(scale_range),
+         count = row_number(),
+         center = count - .5 - (max(count)/2),
+         x_dodge_amount = center*params[['drad']]*2,
+         x_dodge = ifelse(split_overlap_bool==TRUE,
+                          anchor+x_dodge_amount+(center*params[['x.dodge.padding']]),
+                          scale_range),
+         min_x_dodge = min(x_dodge),
+         max_x_dodge = max(x_dodge)) %>%
+  arrange(x_dodge)
+```
+
+## y-dodging 
+
+Generate new groups for y-dodging 
+
+Unlike x-dodging, all points go through y-dodging function 
+
+```{r}
+# get groups for y dodging 
+mutations.df$group = NA
+
+for(i in 1:nrow(mutations.df)){
+  onerow = mutations.df[i,]
+  if(i==1){
+    mutations.df$group[i] = 1
+  }  else{
+    lag = mutations.df[i-1,]
+    before = mutations.df[1:i-1,]
+    mutations.df$group[i] = ifelse(
+      # check to see if part of a previous group 
+      test = onerow$split_overlap_group %in% before$split_overlap_group==TRUE,
+      yes = before$group[which(before$split_overlap_group==onerow$split_overlap_group)[1]],
+      no = ifelse(
+        # if the new x position (x dodge) overlaps with the previous
+        # this using min and max to treat split groups as one point 
+        test = onerow$min_x_dodge-lag$max_x_dodge<params[['overlap']] & onerow$names==lag$names,
+        # then it will be part of the same group 
+        yes = mutations.df$group[i-1],
+        # this is to check for stacked points 
+        no = ifelse(
+          test = onerow$x_dodge==mutations.df$x_dodge[i-1],
+          yes = mutations.df$group[i-1],
+          # make sure that all split params[['overlap']] groups end up in one group
+          no = mutations.df$group[i-1]+1)
+      )
+    )
+  }
+}
+rm(i)
+```
+
+
+```{r}
+mutations.df = mutations.df %>% group_by(nuc_ind) %>% 
+  mutate(Count = row_number()) %>% # there is definitely a smarter way to do this 
+  ungroup() 
+```
+
+
+```{r}
+# y dodging 
+mutations.df$total_count = ave(mutations.df$Count, mutations.df$nuc, FUN = max)
+mutations.df$y = dot_y_base + ((mutations.df$Count-1)*params[['drad']]*2) # calculate y values (assuming no dodging), stack based on nucleotide position
+mutations.df$max_y = ave(mutations.df$y, mutations.df$nuc, FUN = max)
+groups = unique(mutations.df$group)
+```
+
+dodge = amount to adjust original y point by 
+
+```{r}
+mutations.df$dodge = NA
+i = 1
+for(i in 1:length(groups)){
+  onegroup=mutations.df[mutations.df$group==groups[i],]  %>% filter(is.na(group)==FALSE)
+  counts_df = onegroup %>% group_by(split_overlap_group, split_overlap_bool) %>%
+    reframe(max = max(Count)) %>%
+    arrange(max, split_overlap_bool)
+  counts_df$cumsum = cumsum(counts_df$max)
+  # lag function wont work
+  counts_df$lag_cumsum = counts_df$cumsum - counts_df$max
+  counts_df$seq = (1:nrow(counts_df))-1
+  counts_df$dodge = counts_df$lag_cumsum*params[['drad']]*2 + (params[['y.dodge.padding']]*counts_df$seq)
+  
+  nucs = unique(counts_df$split_overlap_group)
+  
+  for(j in 1:length(nucs)){
+    mutations.df$dodge[mutations.df$group==groups[i] & mutations.df$split_overlap_group==nucs[j]] = counts_df$dodge[counts_df$split_overlap_group==nucs[j]]
+  }
+  
+}
+
+rm(onerow, counts_df, i, j)
+```
+
+
+```{r}
+mutations.df$y_dodge = mutations.df$y + mutations.df$dodge 
+rm(i, j)
+```
+Separate out points that have x-dodging -- get lines 
+
+```{r}
+split.df = mutations.df %>% filter(split_overlap_bool==TRUE) %>%
+         mutate(straight_yend = y_dodge - params[['drad']]*2*abs(center))
+```
+
+# Setting up graph 
+
+```{r}
+ymin = -params[['gene.height']]-params[['axis.y.padding']]
+ymax = max(mutations.df$y_dodge) + params[['axis.y.padding']] + params[['y.axis.more.vertical.padding']]
+yaxis = ymax - ymin
+
+xmin = -params[['x.padding']] 
+xmax = max(exons.and.introns.df$scale_coding_stop) + params[['x.padding']]
+xaxis = xmax - xmin
+```
+
+ make new window for plotting
+ 
+```{r, eval = FALSE}
+# make new window for plotting
+window.width = 16
+window.height = 8
+```
+
+get text positions 
+
+```{r}
+mutations.df$nuc.nchar = nchar(mutations.df$nuc)
+mutations.df$pro.nchar = nchar(mutations.df$pro)
+mutations.df$nchar = pmax(mutations.df$nuc.nchar, mutations.df$pro.nchar)
+mutations.df$label.y = mutations.df$y_dodge + params[['drad']] +params[['label.y.nudge']]# just this line sets the center of the label on the top edge of each circle
+mutations.df$label.y = mutations.df$label.y + (params[['text.size']]*mutations.df$nchar)
+mutations.df$label.x = mutations.df$x_dodge
+```
+
+Make labels 
+
+```{r}
+mutations.df = mutations.df %>% 
+  mutate(label.text = paste(nuc, "\n", pro))
+```
+
+```{r}
+gene_plot = ggplot() +
+  # straight segment s
+  geom_segment(data = split.df,
+               aes(x = scale_range,
+                   y = params[['gene.height']],
+                   yend = straight_yend)) +
+  # angled segment
+  geom_segment(data = split.df, 
+               aes(y = straight_yend, 
+                   x = scale_range, 
+                   xend = x_dodge,
+                   yend = y_dodge)) +
+  # split ellipses
+  geom_ellipse(data = split.df,
+               # alpha = .5,
+               aes(x0 = x_dodge,
+                   y0 = y_dodge,
+                   a = params[['drad']], 
+                   b = params[['drad']], 
+                   angle = 0,
+                   fill = Type
+               )) +
+  # normal segments 
+  geom_segment(data = mutations.df[mutations.df$split_overlap_bool==FALSE &
+                                     mutations.df$intron_factor==0,],
+               aes(x = scale_range, 
+                   y = params[['gene.height']], 
+                   yend = y_dodge)) +
+  # intron segments 
+  geom_segment(data = mutations.df[mutations.df$split_overlap_bool==FALSE & 
+                                     mutations.df$intron_factor!=0,],
+               linetype = "dotted",
+               aes(x = scale_range, 
+                   y = 0, 
+                   yend = y_dodge)) +
+  # normal ellipses
+  geom_ellipse(data = mutations.df[mutations.df$split_overlap_bool==FALSE,],
+               # alpha = .75,
+               aes(x0 = scale_range,
+                   y0 = y_dodge,
+                   a = params[['drad']], 
+                   b = params[['drad']], 
+                   angle = 0,
+                   fill = Type
+               )) +  
+  geom_rect(
+    data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Exon"),], 
+    color = "black", fill = "white",linewidth = params[['linesize']], 
+    aes(xmin = scale_coding_start, xmax = scale_coding_stop, ymin = -params[['gene.height']], ymax = params[['gene.height']])) +
+  # introns 
+  geom_segment(data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Intron"),], 
+               linewidth = params[['intron.size']],linetype = params[['intron.linetype']],
+               aes(x = scale_start, y = params[['yvalue']], xend = scale_stop)) +  
+  # geom_point(data = mutations.df, aes(x = left_edge, y = y_dodge)) +
+  xlim(xmin,xmax) +
+  ylim(ymin,ymax) +
+  coord_fixed()+
+  theme(axis.title.x = element_blank(),
+        panel.grid = element_blank(),# Remove x-axis title
+        axis.title.y = element_blank(),  # Remove y-axis title
+        axis.text.x = element_blank(),   # Remove x-axis labels
+        axis.text.y = element_blank(),   # Remove y-axis labels
+        axis.ticks = element_blank(),    # Remove ticks on both axes
+        legend.title =  element_blank(),
+        legend.position = "bottom") # Remove gridlines) 
+
+gene_plot
+
+ggsave(plot = gene_plot, filename = "gene_plot.png", width = 20, height = 10, units = "in")
+```
+
+```{r}
+gene_plot_with_labels = gene_plot + geom_label_repel(data = mutations.df,
+                  size = params[['text.size']],
+                   aes(x = label.x,
+                       y = label.y,
+                       label = label.text))
+
+gene_plot_with_labels
+```
+
+Use for plotting in large window (run in console):
+
+windows()
+gene_plot
+
+windows()
+gene_plot_with_labels
+
+
+I need to work on fixing labels
+
+
+# Now add gnomAD
+
+```{r}
+ga = read.csv("C:/Users/ezraa/Desktop/PNPO 7.9.24/gnomad_pnpo.csv")
+```
+
+Need to set paramters for graphing up top 
+
+## Cleaning 
+
+Need to find indices for nucleotide mutations 
+
+```{r}
+ga = ga %>% 
+  rename(nuc = Transcript.Consequence) %>% # rename shorter variable  
+  mutate(nuc_ind = gsub("^c.|^c", "", nuc)) # get rid of leading "c."
+
+head(ga[,c("nuc", "nuc_ind")])
+```
+
+Some have "_" characters that indicate spanning a distance 
+
+Need to split there 
+
+```{r}
+ga = ga %>% mutate(span_ind = ifelse(grepl("_", nuc_ind) == TRUE,
+                                  yes = str_locate(pattern = "_", nuc_ind),
+                                  no = NA),
+                   start_nuc_char = ifelse(is.na(span_ind)==TRUE, # if there isn't a _ character
+                                  nuc_ind, 
+                                  substr(nuc_ind, 
+                                         start = 1, 
+                                         stop = span_ind-1)),
+                   stop_nuc_char = ifelse(is.na(span_ind)==TRUE,
+                                     nuc_ind, 
+                                     substr(nuc_ind, 
+                                            start = span_ind+1, 
+                                            stop = nchar(nuc_ind)))
+                   )
+```
+
+Now get rid of nucleotide changes to get just numbers 
+
+```{r}
+ga = ga %>% mutate(start_nuc = gsub(pattern = ">|A|G|C|T", 
+                                    replacement = "",
+                                    start_nuc_char),
+                   stop_nuc = gsub(pattern = ">|A|G|C|T", 
+                                    replacement = "",
+                                    stop_nuc_char),
+                   )
+```
+
+Intron coordinates are tricky-- fix those
+
+```{r}
+ga = ga %>% mutate(start_nuc_intron_ind = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",start_nuc)==TRUE, # must be a + or - preceded by at least one digit-- otherwise would select e.g. -71C>T
+                                                 str_locate(pattern = "[0-9]+\\+|[0-9]+-", start_nuc)[row_number(),'end'], # get where the +/- character is 
+                                                 0),
+                   stop_nuc_intron_ind = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",stop_nuc)==TRUE, # must be a + or - preceded by at least one digit-- otherwise would select e.g. -71C>T
+                                                 str_locate(pattern = "[0-9]+\\+|[0-9]+-", stop_nuc)[row_number(),'end'], # get where the +/- character is 
+                                                 0),
+                   start_nuc_ind = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",stop_nuc)==TRUE,
+                                          substr(start_nuc, 
+                                                 start = 1,
+                                                 stop = start_nuc_intron_ind-1),
+                                          start_nuc),
+                   intron_shift_start = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",start_nuc)==TRUE,
+                                               substr(start_nuc,
+                                                      start = start_nuc_intron_ind,
+                                                      stop = nchar(start_nuc)),
+                                               0),
+                    stop_nuc_ind = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",stop_nuc)==TRUE,
+                                          substr(stop_nuc, 
+                                                 start = 1,
+                                                 stop = stop_nuc_intron_ind-1),
+                                          stop_nuc),
+                   intron_shift_stop = ifelse(grepl(pattern = "[0-9]+\\+|[0-9]+-",stop_nuc)==TRUE,
+                                               substr(stop_nuc,
+                                                      start = stop_nuc_intron_ind,
+                                                      stop = nchar(stop_nuc)),
+                                              0)
+                   )
+```
+
+Get rid of some columns 
+
+```{r}
+ga = ga %>% select(-c("start_nuc", "stop_nuc", "span_ind", "start_nuc_char", "stop_nuc_char")) 
+```
+
+Convert to numeric 
+
+```{r}
+# Need to get rid of characters first 
+ga = ga %>% 
+  mutate(across(c(start_nuc_ind, intron_shift_start, stop_nuc_ind, intron_shift_stop),~gsub(pattern = "del|dup|ins", replacement = "", x = .))) 
+
+ga = ga %>% mutate(across(c(start_nuc_ind, intron_shift_start, stop_nuc_ind, intron_shift_stop), list(Square = ~ as.numeric(.)), .names = "{col}_numeric"))
+
+ga[!complete.cases(ga[,which(colnames(ga)=="nuc_ind"):ncol(ga)]),
+   c(which(colnames(ga)=="nuc"),
+     which(colnames(ga)=="VEP.annotation"),
+      which(colnames(ga)=="nuc_ind"):ncol(ga))]  %>% head()
+```
+
+There are some with aesterisks-- refers to 3UTR mutations 
+
+```{r}
+ga[,c(which(colnames(ga)=="nuc"),
+      which(colnames(ga)=="nuc_ind"):ncol(ga))]  %>% filter() %>% head(5)
+```
+
+```{r}
+density(ga$start_nuc_ind_numeric, na.rm = TRUE) %>% plot(main = "Density distribution start_ind")
+```
+
+```{r}
+density(ga$Position, na.rm = TRUE) %>% plot(main = "Density distribution gnomAD ")
+```
+
+
+
+```{r}
+ga.df = left_join(ga %>% rename(nuc_ind_char = nuc_ind, 
+                                nuc_ind = start_nuc_ind_numeric) %>% 
+                    filter(!is.na(nuc_ind)), 
+                  indexing.df)
+ga.df = ga.df %>% 
+  mutate(nuc_ind = as.numeric(nuc_ind)) %>% 
+  mutate(across(c(sequence_range, scale_range, coding_range),~as.numeric(.)))
+```
+```{r}
+density(ga.df$sequence_range, na.rm = TRUE) %>% plot(main = "Density distribution sequence range")
+```
+
+Okay, so it appears that the coding range is what their position is corresponding to 
+
+Not sure how intronic mutations factor into this ?
+
+Whatever, distribution is accurate
+
+Weight by Allele count 
+
+```{r}
+density(ga$Position, weight = ga$Allele.Count/sum(ga$Allele.Count), na.rm = TRUE) %>% plot(main = "Density distribution gnomAD ")
+```
+Bandwiths are really high 
+
+```{r}
+ga.df = ga.df %>% 
+  mutate(adjusted_for_introns = sequence_range + intron_shift_start_numeric) %>%
+  rename(old_scale_range = scale_range,
+         scale_range = adjusted_for_introns)
+```
+
+
+# Plot with density 
+
+```{r} 
+percent_y = .5
+density = density(ga.df$scale_range, na.rm = TRUE)
+density = data.frame(cbind(density$x,density$y))
+colnames(density) = c("x","y")
+density$scaley = density$y * (.5*ymax)/(max(density$y))
+gene_plot + geom_line(data = density,
+                      aes(x = x,
+                          y = scaley))
+summary(density$scaley)
+```
+
+Looks weird-- because binwidth is very high (394.6, see below)
+
+```{r}
+density = density(ga.df$scale_range, na.rm = TRUE)
+density
+```
+
+## Setting bin width to 1 
+
+```{r} 
+percent_y = .5
+density = density(ga.df$scale_range, na.rm = TRUE, 
+                  bw = 1) # bw = binwidth 
+density = data.frame(cbind(density$x,density$y))
+colnames(density) = c("x","y")
+density$scaley = density$y * (.5*ymax)/(max(density$y))
+gene_plot + geom_line(data = density,
+                      aes(x = x,
+                          y = scaley))
+summary(density$scaley)
+```
+
+## Weighted
+
+```{r}
+density(ga.df$scale_range, na.rm = TRUE, 
+                  weight = ga.df$Allele.Count/sum(ga.df$Allele.Count)) %>% plot("Density Scaled")
+```
+
+```{r}
+density(ga.df$scale_range, na.rm = TRUE, 
+                  bw = 1,
+                  weight = ga.df$Allele.Count/sum(ga.df$Allele.Count)) %>% plot("Density Scaled, Bin Width = 1")
+```
+
+```{r} 
+percent_y = .5
+density = density(ga.df$scale_range, na.rm = TRUE, 
+                  bw = 1,
+                  weight = ga.df$Allele.Count/sum(ga.df$Allele.Count))
+density = data.frame(cbind(density$x,density$y))
+colnames(density) = c("x","y")
+density$scaley = density$y * (.5*ymax)/(max(density$y))
+gene_plot + geom_line(data = density,
+                      aes(x = x,
+                          y = scaley))
+summary(density$scaley)
+```
+
+This tells us about mutation distribution but not mutation pathogenicity 
+
+```{r}
+library(gt)
+library(gtExtras)
+table(ga.df$ClinVar.Clinical.Significance) %>% as.data.frame() %>% arrange(-Freq) %>% gt() %>% gt_theme_nytimes()
+```
+
+## Density and clinical significance 
+
+Select only those with predicted clinical significance 
+
+```{r}
+clin = ga.df %>% filter(ClinVar.Clinical.Significance!="") %>% 
+  select(Allele.Count, ClinVar.Clinical.Significance, scale_range, nuc_ind) %>% 
+  mutate(scale_range = ifelse(is.na(scale_range)==TRUE,
+                              nuc_ind, 
+                                scale_range))
+```
+
+```{r}
+clin$ClinVar.Clinical.Significance %>% unique()
+```
+Refactor 
+
+```{r}
+# Recode some variables 
+clin$ClinVar.Clinical.Significance[clin$ClinVar.Clinical.Significance=="Pathogenic/Likely pathogenic"] =  "Likely pathogenic"  
+clin$ClinVar.Clinical.Significance[clin$ClinVar.Clinical.Significance=="Benign/Likely benign"] =  "Likely benign" 
+clin$ClinVar.Clinical.Significance %>% unique() 
+
+levels = c("Benign", "Likely benign", "Uncertain significance", "Likely pathogenic", "Pathogenic","Conflicting interpretations of pathogenicity")
+density_levels = c("#488f31", "#99b48c", "#ebe5d2", "#de9e72","#d53e4f","grey")
+
+clin$ClinVar.Clinical.Significance = factor(clin$ClinVar.Clinical.Significance, levels = levels, ordered = TRUE)
+```
+
+## Try this in ggplot 
+
+```{r}
+ggplot() + geom_density(data = clin,
+               bw = 1,
+               alpha = .5,
+               aes(x = scale_range,
+                   fill = ClinVar.Clinical.Significance,
+                   weight = Allele.Count/sum(Allele.Count))) +
+  scale_fill_manual(values = density_levels) + 
+  geom_rect(
+    data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Exon"),], 
+    color = "black", fill = "white",linewidth = params[['linesize']], 
+    aes(xmin = scale_coding_start, 
+        xmax = scale_coding_stop, 
+        ymin = -.01, 
+        ymax = 0)) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  xlab('') + 
+  ylab('') +
+  ggtitle("Density Plot, Bin Width = 1")
+```
+
+```{r}
+ggplot() + 
+  geom_density(data = clin,
+               alpha = .5,
+               bw = 3,
+               aes(x = scale_range,
+                   fill = ClinVar.Clinical.Significance,
+                   color = ClinVar.Clinical.Significance,
+                   weight = Allele.Count/sum(Allele.Count))) + 
+    scale_fill_manual(values = density_levels) + 
+  scale_color_manual(values = density_levels) +
+  geom_rect(
+    data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Exon"),], 
+    color = "black", fill = "white",linewidth = params[['linesize']], 
+    aes(xmin = scale_coding_start, 
+        xmax = scale_coding_stop, 
+        ymin = -.01, 
+        ymax = 0)) +
+    theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  xlab('') + 
+  ylab('') +
+  ggtitle("Density Plot, Bin Width = 1")
+```
+
+Ranges from 0 to 0.006
+
+Need to scale mutations.df y values accordingly 
+
+```{r}
+
+density_max = 0.04
+
+split.df = split.df %>% 
+  mutate(straight_yend = straight_yend/max(straight_yend)*density_max,
+         y_dodge = y_dodge/max(y_dodge)*density_max)
+mutations.df = mutations.df %>% 
+  mutate(y_dodge = y_dodge/max(y_dodge)*density_max)
+ymin = -  density_max/2
+ymax=  density_max *2
+yaxis = ymax-ymin 
+
+params[['gene.height']] = density_max/20
+params[['drad']]
+
+
+a = params[['drad']]
+b= a/(xaxis/(yaxis*2))
+ratio = (xmax-xmin)/yaxis
+ggplot() +
+  geom_density(data = clin,
+               alpha = .5,
+               bw = 3,
+               aes(x = scale_range,
+                   fill = ClinVar.Clinical.Significance,
+                   color = ClinVar.Clinical.Significance,
+                   weight = Allele.Count/sum(Allele.Count))) + 
+  scale_fill_manual(values = density_levels) + 
+  scale_color_manual(values = density_levels) +
+  ggnewscale::new_scale_fill() + 
+  ggnewscale::new_scale_color() +
+  # straight segment s
+  geom_segment(data = split.df,
+               alpha = .5,
+               aes(x = scale_range,
+                   y = 0,
+                   yend = straight_yend)) +
+  # angled segment
+  geom_segment(data = split.df, 
+               alpha = .5,
+               aes(y = straight_yend, 
+                   x = scale_range, 
+                   xend = x_dodge,
+                   yend = y_dodge)) +
+  # split ellipses
+  geom_ellipse(data = split.df,
+               alpha = .75,
+               aes(x0 = x_dodge,
+                   y0 = y_dodge,
+                   a = a,
+                   b = b,
+                   angle = 0,
+                   fill = Type
+               )) +
+  # normal segments 
+  geom_segment(data = mutations.df[mutations.df$split_overlap_bool==FALSE & mutations.df$intron_factor==0,],
+               alpha = .5,
+               aes(x = scale_range, 
+                   y = 0, 
+                   yend = y_dodge)) +
+  # intron segments 
+  geom_segment(data = mutations.df[mutations.df$split_overlap_bool==FALSE & 
+                                     mutations.df$intron_factor!=0,],
+               linetype = "dotted",
+               alpha = .5,
+               aes(x = scale_range, 
+                   y = 0, 
+                   yend = y_dodge)) +
+  # normal ellipses
+  geom_ellipse(data = mutations.df[mutations.df$split_overlap_bool==FALSE,],
+               alpha = .75,
+               aes(x0 = scale_range,
+                   y0 = y_dodge,
+                   a = a,
+                   b = b,
+                   angle = 0,
+                   fill = Type
+               )) +
+  geom_rect(
+    data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Exon"),], 
+    color = "black", fill = "white",linewidth = params[['linesize']], 
+    aes(xmin = scale_coding_start, 
+        xmax = scale_coding_stop, 
+        ymin = -params[['gene.height']], 
+        ymax = 0)) +
+  
+  # introns 
+  geom_segment(data = exons.and.introns.df[grepl(exons.and.introns.df$names, pattern = "Intron"),], 
+               linewidth = params[['intron.size']],linetype = params[['intron.linetype']],
+               aes(x = scale_start, y = params[['yvalue']], xend = scale_stop)) +  
+  coord_fixed(xlim = c(xmin, xmax),
+              ylim = c(ymin, ymax),
+              ratio = (xmax-xmin)/(yaxis*2)) +
+  theme_void() + 
+  theme(axis.title.x = element_blank(),
+        panel.grid = element_blank(),# Remove x-axis title
+        axis.title.y = element_blank(),  # Remove y-axis title
+        axis.text.x = element_blank(),   # Remove x-axis labels
+        axis.text.y = element_blank(),   # Remove y-axis labels
+        axis.ticks = element_blank(),    # Remove ticks on both axes
+        legend.title =  element_blank(),
+        legend.position = "bottom") # Remove gridlines) 
+
+ggsave("nucleotide density.tif", width = 20, height = 7)
+```
+
+
+
