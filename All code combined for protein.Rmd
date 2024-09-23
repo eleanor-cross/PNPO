@@ -1,0 +1,976 @@
+---
+title: "All code combined protein"
+output: html_document
+date: "2024-07-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(stringr)
+library(phylotools)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(pals)
+library(ggforce)
+library(ggnewscale)
+library(ggrepel)
+library(readxl)
+library(data.table)
+library(ggpubr)
+setwd("C:/Users/ezraa/Desktop/PNPO 7.9.24/")
+```
+
+
+```{r, message = FALSE}
+rm(list = ls())
+```
+
+Set graphing params 
+
+```{r, message = FALSE}
+scale_factor = 20
+yvalue = 0
+exwidth = .05
+inwidth = .05
+ypadding = 5
+drad = .075
+gcols = c("cyan4", "gray")
+ymin = 1-(exwidth/2)-ypadding/8
+ymax = 1 + (exwidth/2)+ypadding
+xpadding = 500
+overlap = 3
+nudge_y = 1
+lwidth = 1
+linesize = .75
+lineType = "dotted"
+label_ymax = 2
+gwidth = 1
+xpadding = 5
+drad = .2
+dodge_padding = 1
+scale_factor = .15
+xvalue = 0 
+
+plot.padding = 1
+# calculated values based on params 
+dot_y_base = yvalue + gwidth + drad
+```
+
+
+# Data manipulation 
+
+## Fasta
+
+```{r, message = FALSE}
+fasta = phylotools::read.fasta("C:/Users/ezraa/Desktop/PNPO 7.9.24/PNPO.txt")
+```
+
+## Domains 
+
+```{r, message = FALSE}
+ds = read.csv("C:/Users/ezraa/Desktop/PNPO 7.9.24/active_sites.csv")
+ds_tile = ds
+head(ds)
+```
+
+## Mutations 
+
+
+
+```{r, message = FALSE}
+muts = read_xlsx("C:/Users/ezraa/Desktop/PNPO 7.9.24/final PNPO.xlsx") 
+```
+Those for which muts$Ind = NA are heterozygotes 
+
+Filter these out 
+
+
+```{r, message = F, warning = F}
+muts$Ind = as.numeric(muts$Ind)
+muts[is.na(muts$Ind),] %>% head(5)
+muts = muts[!is.na(muts$Ind),]
+```
+
+```{r, message = FALSE}
+muts = muts %>% group_by(`1st protein mutation`) %>%
+  mutate(Count = row_number()) %>% 
+  rename(genotype = `Mutation in literature`, 
+         Mutation = `1st protein mutation`) %>% 
+  # select(Mutation, Ind, Type, Count) %>% 
+  ungroup()
+```
+
+Dodging (varying x axis so points don't overlap)
+
+```{r, message = FALSE}
+muts$x = dot_y_base + ((muts$Count-1)*drad*2)
+```
+
+```{r, message = FALSE}
+# function to determine groups for dodging 
+muts$Group = NA
+
+muts = muts[order(muts$Ind),]
+muts$lag_Ind = lag(muts$Ind)
+
+
+i = 1
+for(i in 1:nrow(muts)){
+  onerow = muts[i,]
+  if(i==1){
+    muts$Group[i] = 1
+  } else{
+    muts$Group[i] = ifelse(onerow$Ind-onerow$lag_Ind<overlap,
+                           muts$Group[i-1],
+                           muts$Group[i-1]+1)
+  }
+}
+rm(onerow,i)
+
+# mutations that are in the same group are
+# determine 
+muts$total_count = ave(muts$Count, muts$Mutation, FUN = max)
+muts$max_y = ave(muts$x, muts$Mutation, FUN = max)
+muts$dodge = NA
+groups = unique(muts$Group)
+
+
+i = 1
+for(i in 1:length(groups)){
+  onegroup=muts[muts$Group==groups[i],]
+  # group by mutation and return how many patients with each mutation 
+  # arrange in ascending # of patients 
+  counts_df = onegroup %>% group_by(Mutation) %>%
+    reframe(max = max(Count)) %>%
+    arrange(max)
+  # now determine how many total patients came before each 
+  counts_df$cumsum = cumsum(counts_df$max)
+  # lag function wont work
+  # lag of the cumulative patients before the first 
+  counts_df$lag_cumsum = counts_df$cumsum - counts_df$max
+  # 1,2,3...n variable 
+  counts_df$seq = (1:nrow(counts_df))-1
+  counts_df$lag_seq = counts_df$seq - 1
+  counts_df$lag_seq[counts_df$lag_seq < 0] = 0
+  counts_df$old_dodge = counts_df$lag_cumsum*drad + (dodge_padding*counts_df$seq)
+  counts_df$dodge = counts_df$lag_cumsum*drad*2 + (dodge_padding*counts_df$seq) 
+  # + drad*counts_df$seq
+  counts_df$dodge[counts_df$cumsum==1] = 0
+  
+  Mutations = unique(counts_df$Mutation)
+  
+  for(j in 1:length(Mutations)){
+    muts$dodge[muts$Group==groups[i] & muts$Mutation==Mutations[j]] = counts_df$dodge[counts_df$Mutation==Mutations[j]]
+  }
+  
+}
+
+rm(i, j, counts_df)
+
+muts$x_dodge = muts$x + muts$dodge 
+
+fasta_df = str_split(fasta$seq.text, "") %>% as.data.frame() %>% mutate(Ind = row_number())
+colnames(fasta_df) = c("AA", "Ind")
+```
+
+```{r, message = FALSE}
+muts[muts$Mutation=="Asp33Val",]
+```
+
+Join domains to the dataframe with the FASTA sequence 
+
+```{r, message = FALSE}
+ds = ds %>% rename(Ind = AA) 
+ds = ds %>% select(Ind, Ligand) %>% unique() %>% subset(!is.na(ds$Ind))
+fasta_ds = full_join(fasta_df, ds)
+# rm(fasta_df)
+```
+
+```{r, message = FALSE}
+# find unique mutation indices
+unique_muts = unique(muts$Ind) %>% as.data.frame() %>% rename(Ind = ".") %>% mutate(is_mut_site = "Yes")
+full_df = full_join(fasta_ds, unique_muts)
+full_df$br = ifelse(!is.na(full_df$Ligand)| !is.na(full_df$is_mut_site), "Yes", "No")
+full_df$lag_br = lag(full_df$br)
+full_df$grp = NA
+```
+
+```{r, message = FALSE}
+rm(fasta_ds)
+full = full_join(full_df, muts)
+```
+
+## Line segments
+
+```{r, message = FALSE}
+full$Mutation_yd_minimum = ave(full$x_dodge, full$Mutation, FUN = min)
+
+# making line dataframe 
+l = full %>% select(Mutation, Ind, Mutation_yd_minimum) %>% unique()
+l$x = gwidth
+l$xend = l$Mutation_yd_minimum - drad
+```
+
+## Labels
+
+```{r, message = FALSE}
+labels = muts %>%
+  group_by(Mutation, Ind) %>%
+  summarize(max = max(x_dodge)) %>%
+  as.data.frame()
+```
+# Graphing 
+
+General graphing info 
+
+```{r, message = FALSE}
+xmin = -xpadding 
+xmax =  max(full$x_dodge, na.rm = TRUE) + xpadding
+ymin = -gwidth - ypadding
+ymax = max(full$Ind, na.rm = TRUE) + ypadding
+x_axis = xmax-xmin
+y_axis = ymax-ymin
+xyratio = (x_axis/y_axis)
+a = drad*xyratio
+```
+
+## Graph without anything fancy (skeleton) 
+
+```{r, message = FALSE}
+g = ggplot() +
+  geom_segment(data = l, 
+               linewidth = lwidth,
+               aes(y = Ind, 
+                   x = x, 
+                   xend = xend)) +
+  geom_rect(
+    color = "black", 
+    fill = "white", 
+    aes(
+      ymin = 0,
+      ymax = 261,
+      xmin = xvalue -gwidth,
+      xmax = xvalue + gwidth,
+    )) +
+  ylim(ymin, ymax) +
+  xlim(xmin, xmax) + 
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),  # Remove x-axis title
+    axis.title.y = element_blank(),  # Remove y-axis title
+    axis.text.x = element_blank(),   # Remove x-axis labels
+    axis.text.y = element_blank(),   # Remove y-axis labels
+    axis.ticks = element_blank(),    # Remove ticks on both axes
+    legend.title =  element_blank(),
+    panel.grid = element_blank()# Remove gridlines
+  ) +
+  coord_fixed(xyratio) +
+  scale_y_continuous(breaks = seq(from = 0, to= xmax, by = 50))
+g + geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               fill = "white",
+               aes(y0 = Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+               )) 
+```
+
+
+
+## Add labels 
+
+Labels have to be split up because geom_label_repel isn't perfect 
+
+```{r, message = FALSE}
+full = full %>% group_by(Group) %>% mutate(ngroup = n()) 
+full$one = ifelse(full$ngroup==full$Count, TRUE, FALSE)
+
+labels = full[!is.na(full$Mutation),] %>%
+  group_by(Mutation, Ind, ngroup, one) %>%
+  summarize(max = max(x_dodge)) %>%
+  as.data.frame()
+
+
+label_ymax = ymax + 1
+label_xmin = xmin
+
+```
+
+```{r}
+g2 = g + 
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               fill = "white",
+               aes(y0 = Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+               )) 
+ls = g + geom_label_repel(
+  data = labels[labels$one==TRUE,], 
+  max.overlaps = Inf,
+  size = 3,
+  force = 4,
+  # ylim = c(2.5,5),
+  xlim = c(yvalue+gwidth,1200),
+  label.padding = .2,
+  # nudge_x = .4,
+  direction = "x",
+  nudge_x = 1.5,
+  point.padding = .4,
+  aes(y = Ind, 
+      x = max, 
+      label = Mutation)) 
+
+ls2 = ls + 
+  geom_label_repel(
+    data = labels[labels$Ind==213,], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 5,
+    ylim = c(2.5,211),
+    xlim = c(labels$max[labels$Ind==213],1200),
+    label.padding = .2,
+    direction = "x",
+    point.padding = .4,
+    nudge_x = .3,
+    aes(y = Ind, 
+        x = max, 
+        label = Mutation)) +
+  geom_label_repel(
+    data = labels[labels$Ind==214,], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    ylim = c(2.5,211),
+    xlim = c(xvalue+gwidth,labels$max[labels$Ind==213]),
+    label.padding = .2,
+    # direction = "y",
+    point.padding = .4,
+    nudge_x = 6,
+    aes(y = Ind, 
+        x = max, 
+        label = Mutation))
+
+# bottom and to labels 
+labels$tb = NA
+labels$tb[labels$Mutation=="Arg95His" | labels$Ind==225] = "b"
+labels$tb[labels$Mutation=="Arg95Cys" | labels$Ind==229 | labels$Ind==118] = "t"
+table(labels$tb)
+
+ls3 = ls2 + 
+  geom_label_repel(
+  data = labels[labels$tb == "b"&labels$Ind!=225,], 
+  max.overlaps = Inf,
+  size = 3,
+  force = 4,
+  xlim = c(xvalue+gwidth,1200),
+  label.padding = .2,
+  direction = "x",
+  point.padding = .6,
+  nudge_y = -(drad/xyratio)*3,
+  aes(y = Ind, 
+      x = max, 
+      label = Mutation)) + 
+  geom_label_repel(
+        data = labels[labels$tb == "b"&
+                  grepl(labels$Mutation, 
+                        pattern = "Arg225Cys|Arg225Gln") == TRUE,], 
+        max.overlaps = Inf,
+        size = 3,
+        force = 4,
+        xlim = c(xvalue+gwidth,1200),
+        label.padding = .2,
+        direction = "x",
+        point.padding = .6,
+        nudge_y = -(drad/xyratio)*4,
+        nudge_x = (drad/xyratio)*2,
+        aes(y = Ind, 
+            x = max, 
+            label = Mutation)) + 
+  geom_label_repel(
+    data = labels[labels$Mutation == "Arg225His"|labels$Ind==116,], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    xlim = c(xvalue+gwidth,1200),
+    label.padding = .2,
+    direction = "x",
+    point.padding = .6,
+    # nudge_y = -(drad/xyratio)*3,
+    nudge_x = (drad/xyratio)*.5,
+    aes(y = Ind, 
+        x = max, 
+        label = Mutation))+ 
+  geom_label_repel(
+    data = labels[labels$Mutation == "Arg225Leu",], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    xlim = c(xvalue+gwidth,1200),
+    label.padding = .2,
+    # direction = "x",
+    point.padding = .6,
+    nudge_y = (drad/xyratio)*5.5,
+    nudge_x = (drad/xyratio),
+    aes(y = Ind, 
+        x = max, 
+        label = Mutation)) + 
+  geom_label_repel(
+    data = labels[labels$tb == "t",], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    xlim = c(yvalue+gwidth,1200),
+    direction = "y",
+    point.padding = .6,
+    nudge_y = drad/xyratio,
+    aes(y = Ind, 
+        x = max, 
+        label = Mutation))
+```
+
+```{r, message = FALSE}
+ls3  +
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               fill = "white",
+               aes(y0 = Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+               )) 
+```
+## Plot with mutation type and domains 
+
+```{r, message = FALSE}
+domains = full_df %>% filter(is.na(Ligand) == FALSE) %>% 
+  mutate(Ind.minus.one = Ind-1,)
+```
+
+
+```{r, message = FALSE}
+plot = g + new_scale_fill() + 
+   geom_rect(
+    color = "black",
+    data = domains,
+    alpha = 1,
+    width = gwidth*2,
+    aes(ymin = Ind.minus.one,
+      ymax = Ind,
+      xmin = xvalue - gwidth,
+      xmax = xvalue + gwidth,
+        fill = Ligand,
+        color = Ligand
+    )
+  ) +
+  scale_fill_manual(values = c("#DFC27D","#C7EAE5")) + 
+  ggnewscale::new_scale_fill() +
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               aes(y0 = Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+                   fill = Type
+               )) +
+  theme(legend.position = "bottom")
+
+plot
+```
+## Graph with heatmap info
+
+### Heatmap data
+
+```{r, message = FALSE}
+hm = fread("C:/Users/ezraa/Desktop/PNPO 7.9.24/protein plot/AF-Q9NVS9-F1-aa-substitutions.csv")
+head(hm)
+```
+This will require manipulation 
+
+```{r, message = FALSE}
+hm = hm %>% mutate(Ind = gsub(pattern = "[^0-9]", 
+                              replacement = "",
+                              protein_variant) %>% as.numeric(),
+                   original = substr(protein_variant,
+                                  start = 1, 
+                                  stop = 2) %>% as.numeric(),
+                   sub = substr(protein_variant,
+                                  start = nchar(protein_variant), 
+                                  stop = nchar(protein_variant)),
+                   Pathogenicity = as.numeric(am_pathogenicity))
+head(hm)
+```
+
+```{r, message = FALSE}
+heatmap_plot = ggplot() + geom_tile(data = hm, aes(y = Ind, x = sub, fill = Pathogenicity))  + 
+  theme(axis.text = element_blank(),
+        axis_ticks = element_blank(),
+        ) + 
+  scale_fill_gradientn(colours=coolwarm(100), guide = "colourbar") + 
+  ylim(ymin,ymax) +
+  ylab("Original Amino Acid") + 
+  xlab("Substitution") +
+  theme_minimal() +
+  theme(
+    # axis.title.x = element_blank(),  # Remove x-axis title
+    # axis.title.y = element_blank(),  # Remove y-axis title
+    axis.text.x = element_blank(),   # Remove x-axis labels
+    axis.text.y = element_blank(),   # Remove y-axis labels
+    axis.ticks = element_blank(),    # Remove ticks on both axes
+    panel.grid = element_blank(),# Remove gridlines,
+    legend.position = "bottom"
+  )
+heatmap_plot
+```
+```{r, message = FALSE}
+hm = hm %>% group_by(Ind) %>% mutate(average = mean(Pathogenicity))
+```
+
+```{r, message = FALSE}
+heatmap_plot = ggplot() + 
+  geom_tile(data = hm, 
+            aes(y = Ind, 
+                x = sub, 
+                fill = Pathogenicity))  + 
+  theme(axis.text = element_blank(),
+        axis_ticks = element_blank(),
+  ) + 
+  scale_fill_gradientn(colours=coolwarm(100), guide = "colourbar") + 
+  ylim(ymin,ymax) +
+  ylab("Original Amino Acid") + 
+  xlab("Substitution") +
+  theme_minimal() +
+  theme(
+    # axis.title.x = element_blank(),  # Remove x-axis title
+    # axis.title.y = element_blank(),  # Remove y-axis title
+    axis.text.x = element_blank(),   # Remove x-axis labels
+    axis.text.y = element_blank(),   # Remove y-axis labels
+    axis.ticks = element_blank(),    # Remove ticks on both axes
+    panel.grid = element_blank(),# Remove gridlines,
+    legend.position = "bottom"
+  )
+
+ggarrange(heatmap_plot, plot)
+```
+
+Using the usual arrange function isn't working so data transformation: 
+
+
+```{r, message = FALSE}
+hm$sub = factor(hm$sub)
+hm = hm %>% mutate(Ind.minus.one = Ind-1,
+                   sub_num = as.numeric(sub),
+                   sub_num_neg = sub_num - (max(sub_num) + 2),
+                   sub_num_neg.minus.one = sub_num_neg+1)
+summary(hm$Ind)
+summary(hm$Ind.minus.one)
+summary(full$Ind)
+nchar(fasta$seq.text)
+
+hmav = hm %>% 
+  select(Ind,Ind.minus.one, average) %>% 
+  rename(Pathogenicity=average) %>% 
+  mutate(av_minus = Pathogenicity - plot.padding*3)
+
+p2 = plot + new_scale_fill() + 
+  geom_rect(data = hmav, 
+            aes(xmin = -plot.padding - 3, 
+                xmax = -plot.padding - 2, 
+                ymin = Ind.minus.one, 
+                ymax = Ind,
+                fill = Pathogenicity, 
+                color = Pathogenicity)) +
+  geom_segment(data = hmav,
+               linewidth = .75,
+               aes(x  = -plot.padding-2, 
+                   xend = av_minus, 
+                   y = Ind)) +
+  geom_rect(data = hm, 
+            aes(xmin = sub_num_neg.minus.one-plot.padding*4, 
+                xmax = sub_num_neg-plot.padding*4, 
+                ymin = Ind.minus.one, 
+                ymax = Ind,
+                fill = Pathogenicity, 
+                color = Pathogenicity)) + 
+  scale_fill_gradientn(colours=coolwarm(100), guide = "colourbar") +
+  scale_color_gradientn(colours=coolwarm(100), guide = "colourbar") + 
+  ylim(ymin,ymax) +
+  ylab("Original Amino Acid") + 
+  xlab("Substitution") +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title.position = "top"
+  ) + 
+  xlim(min(hm$sub_num_neg, na.rm = TRUE),xmax) + 
+  guides(color = "none") 
+
+p2
+```
+
+```{r}
+ggsave(p2, filename = "protein heatmap.tif", width = 20, height = 20)
+```
+```{r}
+heatmap_labels = ls3 + new_scale_fill() + 
+   geom_rect(
+    color = "black",
+    data = domains,
+    alpha = 1,
+    width = gwidth*2,
+    aes(ymin = Ind.minus.one,
+      ymax = Ind,
+      xmin = xvalue - gwidth,
+      xmax = xvalue + gwidth,
+        fill = Ligand,
+        color = Ligand
+    )
+  ) +
+  scale_fill_manual(values = c("#DFC27D","#C7EAE5")) + 
+  ggnewscale::new_scale_fill() +
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               aes(y0 = Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+                   fill = Type
+               )) +
+  new_scale_fill() +
+geom_rect(data = hmav,
+aes(xmin = -plot.padding - 3,
+xmax = -plot.padding - 2,
+ymin = Ind.minus.one,
+ymax = Ind,
+fill = Pathogenicity,
+color = Pathogenicity)) +
+geom_segment(data = hmav,
+linewidth = .75,
+aes(x  = -plot.padding-2,
+xend = av_minus,
+y = Ind)) +
+geom_rect(data = hm,
+aes(xmin = sub_num_neg.minus.one-plot.padding*4,
+xmax = sub_num_neg-plot.padding*4,
+ymin = Ind.minus.one,
+ymax = Ind,
+fill = Pathogenicity,
+color = Pathogenicity)) +
+scale_fill_gradientn(colours=coolwarm(100), guide = "colourbar") +
+scale_color_gradientn(colours=coolwarm(100), guide = "colourbar") +
+ylim(ymin,ymax) +
+ylab("Original Amino Acid") +
+xlab("Substitution") +
+theme_void() +
+theme(
+legend.position = "bottom",
+legend.title.position = "top"
+) +
+xlim(min(hm$sub_num_neg, na.rm = TRUE),xmax) +
+guides(color = "none")
+heatmap_labels
+```
+ggsave(heatmap_labels, filename =  "heatmap labels.tif", width = 15, height = 15)
+
+# Plots with scaled indices
+
+Code for scaling (making binding sites bigger to read easier)) 
+
+```{r}
+i = 1
+for(i in 1:nrow(full_df)){
+  if(i == 1){
+    full_df$grp[i] = 1
+  }
+  else if (full_df$br[i] != "Yes" && full_df$lag_br[i] != "Yes"){
+    full_df$grp[i] = full_df$grp[i-1]
+  } 
+  else{
+    full_df$grp[i] = full_df$grp[i-1] + 1
+  }
+  
+}
+rm(i)
+
+full_df$scaled_Ind = NA
+
+for(i in 1:nrow(full_df)){
+  if(i==1){
+    full_df$scaled_Ind[i] = 1
+  } else if(full_df$br[i]=="Yes"){
+    full_df$scaled_Ind[i] = full_df$scaled_Ind[i-1] + 1
+  } else{
+    full_df$scaled_Ind[i] = full_df$scaled_Ind[i-1] + scale_factor
+  }
+  
+}
+
+
+rm(fasta_ds)
+
+full = full_join(full_df, muts)
+```
+
+```{r}
+# line segmenets time 
+full$Mutation_yd_minimum = ave(full$x_dodge, full$Mutation, FUN = min)
+
+# making line dataframe 
+l = full %>% select(Mutation, scaled_Ind, Mutation_yd_minimum) %>% unique()
+l$x = gwidth
+l$xend = l$Mutation_yd_minimum - drad
+```
+
+```{r}
+labels = muts %>%
+  group_by(Mutation, Ind) %>%
+  summarize(max = max(x_dodge)) %>%
+  as.data.frame()
+
+xmin = -xpadding 
+xmax =  max(full$x_dodge, na.rm = TRUE) + xpadding
+ymin = -gwidth - ypadding
+ymax = max(full$scaled_Ind, na.rm = TRUE) + ypadding
+x_axis = xmax-xmin
+y_axis = ymax-ymin
+xyratio = (x_axis/y_axis)
+a = drad*xyratio
+```
+```{r}
+g = ggplot() +
+  geom_segment(data = l, 
+               linewidth = lwidth,
+               aes(y = scaled_Ind, 
+                   x = x, 
+                   xend = xend)) +
+  geom_rect(
+    color = "black", 
+    fill = "white", 
+    aes(
+      ymin = 0,
+      ymax = max(full$scaled_Ind),
+      xmin = -gwidth,
+      xmax = gwidth,
+    )) +
+  ylim(ymin, ymax) +
+  xlim(xmin, xmax) +
+  # geom_rect(data = ds_tile,
+  #           color = "black",
+  #           alpha = .5,
+  #           aes(
+  #             xmin = Ind,
+  #             xmax = Ind,
+  #             ymin = -gwidth,
+  #             ymax = gwidth,
+  #             fill = Function
+  #           )) +
+  geom_tile(
+    color = "black",
+    data = full[!is.na(full$Ligand),],
+    alpha = 1,
+    width = gwidth*2,
+    aes(y = scaled_Ind,
+        x = 0, 
+        fill = Ligand,
+        color = Ligand
+    )
+  ) + 
+  scale_fill_manual(values = c("#DFC27D","#C7EAE5")) + 
+  ggnewscale::new_scale_fill() +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),  # Remove x-axis title
+    axis.title.y = element_blank(),  # Remove y-axis title
+    axis.text.x = element_blank(),   # Remove x-axis labels
+    axis.text.y = element_blank(),   # Remove y-axis labels
+    axis.ticks = element_blank(),    # Remove ticks on both axes
+    # legend.title =  element_blank(),
+    panel.grid = element_blank()# Remove gridlines
+  ) +
+  coord_fixed(xyratio) +
+  ggtitle("PNPO Protein Mutations: Cognitive Developement") + 
+  scale_y_continuous(breaks = seq(from = 0, to= xmax, by = 50))
+
+```
+
+```{r}
+full = full %>% group_by(Group) %>% mutate(ngroup = n()) 
+full$one = ifelse(full$ngroup==full$Count, TRUE, FALSE)
+
+labels = full[!is.na(full$Mutation),] %>%
+  group_by(Mutation, scaled_Ind, Ind, ngroup, one) %>%
+  summarize(max = max(x_dodge)) %>%
+  as.data.frame()
+
+
+label_ymax = ymax + 1
+label_xmin = xmin
+
+ls = g + geom_label_repel(
+  data = labels[labels$one==TRUE,], 
+  max.overlaps = Inf,
+  size = 3,
+  force = 4,
+  # ylim = c(2.5,5),
+  xlim = c(yvalue+gwidth,1200),
+  label.padding = .2,
+  # nudge_x = .4,
+  direction = "x",
+  nudge_x = .5,
+  point.padding = .4,
+  aes(y = scaled_Ind, 
+      x = max, 
+      label = Mutation)) 
+
+ls2 = ls + 
+  geom_label_repel(
+    data = labels[labels$Ind==213,], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    # ylim = c(2.5,5),
+    xlim = c(yvalue+gwidth,1200),
+    label.padding = .2,
+    direction = "x",
+    point.padding = .4,
+    nudge_x = .3,
+    aes(y = scaled_Ind, 
+        x = max, 
+        label = Mutation)) +
+  geom_label_repel(
+    data = labels[labels$Ind==214,], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    # ylim = c(2.5,5),
+    xlim = c(yvalue+gwidth,1200),
+    label.padding = .2,
+    direction = "x",
+    point.padding = .4,
+    nudge_x = 6,
+    aes(y = scaled_Ind, 
+        x = max, 
+        label = Mutation))
+
+# windows()
+labels$tb = NA
+labels$tb[labels$Mutation=="Arg95His" | labels$Ind==225] = "b"
+labels$tb[labels$Mutation=="Arg95Cys" | labels$Ind==229] = "t"
+table(labels$tb)
+
+ls3 = ls2 + geom_label_repel(
+  data = labels[labels$tb == "b",], 
+  max.overlaps = Inf,
+  size = 3,
+  force = 4,
+  xlim = c(yvalue+gwidth,1200),
+  label.padding = .2,
+  direction = "x",
+  point.padding = .6,
+  nudge_y = -2,
+  aes(y = scaled_Ind, 
+      x = max, 
+      label = Mutation)) + 
+  geom_label_repel(
+    data = labels[labels$tb == "t",], 
+    max.overlaps = Inf,
+    size = 3,
+    force = 4,
+    xlim = c(yvalue+gwidth,1200),
+    direction = "y",
+    point.padding = .6,
+    nudge_y = 2,
+    aes(y = scaled_Ind, 
+        x = max, 
+        label = Mutation))
+```
+
+## Cognitive disability 
+```{r}
+full$cognitive_quant%>%unique()
+
+full$cognitive_quant[full$cognitive_quant=="† before assessment"&!is.na(full$cognitive_quant)] = "Died before assessment"
+
+full$`Cognitive Developement` = factor(full$cognitive_quant, levels = c("?","Died before assessment", "DD (unspecified)","Normal or near normal development", "Mild delay", "Moderate delay", "Severe delay"), ordered = TRUE)
+
+
+muts$`Cognitive Developement`
+ls3 + new_scale_fill() + 
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               aes(y0 = scaled_Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+                   fill = `Cognitive Developement`
+               )) +
+  scale_fill_manual(values = c("lightgrey", "black", "#5E4FA2", "#ABDDA4", "#FEE08B", "#FDAE61", "#D53E4F")) 
+
+ggsave(filename = "cog dev.tif", width = 15, height = 15)
+
+```
+# Motor dev 
+
+```{r}
+full$motor_quant%>%unique()
+full$motor_quant[full$motor_quant=="† before assessment"&!is.na(full$motor_quant)] = "Died before assessment"
+
+full$`Motor Developement` = factor(full$cognitive_quant, levels = c("?","Died before assessment", "DD (unspecified)","Normal or near normal development", "Mild delay", "Moderate delay", "Severe delay"), ordered = TRUE)
+
+ls3 + new_scale_fill() + 
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               aes(y0 = scaled_Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+                   fill = `Motor Developement`
+               )) +
+  scale_fill_manual(values = c("lightgrey", "black", "#5E4FA2", "#ABDDA4", "#FEE08B", "#FDAE61", "#D53E4F")) 
+
+ggsave(filename = "motor dev.tif", width = 15, height = 15)
+```
+
+## Seizure onset
+
+```{r}
+colors = c("#800026","#BD0026", "#E31A1C","#FC4E2A","#FD8D3C","#FEB24C","#FED976","#FFEDA0","#FFFFCC"  )
+
+list = c("≤ 30 min", "≤ 12 h", "≤ 24 h", "≤ 48 h", "≤ 1 w","≤ 1 m", "≤ 6 m", "≤ 1 y", "≤ 2 y", "≤ 4 y","Neonatal (unspecified)", "No seizures (treated prophylactically)")
+
+full$`Seizure onset ranges`[full$`Seizure onset ranges`=="≤ 1 h" | full$`Seizure onset ranges`=="≤ 6 h"] = "≤ 12 h"
+full$`Seizure onset ranges`[full$`Seizure onset ranges`=="≤ 2 w"] = "≤ 1 m"
+full$`Seizure onset ranges`[full$`Seizure onset ranges`=="≤ 2 y"| full$`Seizure onset ranges`=="≤ 4 y"] = "≥ 2 y"
+list = c("≤ 30 min", "≤ 12 h", "≤ 24 h", "≤ 48 h", "≤ 1 w","≤ 1 m", "≤ 6 m", "≤ 1 y", "≤ 2 y", "≥ 2 y","Neonatal (unspecified)", "No seizures (treated prophylactically)")
+
+full$`Seizure onset ranges` = factor(full$`Seizure onset ranges`, levels = list, ordered = TRUE)
+```
+
+```{r}
+ls3 +   
+  new_scale_fill() + 
+  geom_ellipse(data = full[!is.na(full$Mutation),],
+               alpha = 1,
+               aes(y0 = scaled_Ind,
+                   x0 = x_dodge,
+                   b = drad/xyratio,
+                   a = drad,
+                   angle = 0,
+                   fill = `Seizure onset ranges`
+               )) +
+  scale_fill_manual(values = c(colors[1:8], "#5E4FA2", "#ABDDA4", "grey"))
+
+ggsave(filename = "seizure onset.tif", width = 15, height = 15)
+```
+
